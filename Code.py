@@ -1,6 +1,8 @@
 import pygame
 import sys
 import math
+import heapq
+import random
 from collections import deque
 
 pygame.init()
@@ -10,7 +12,7 @@ CELL        = 100
 GRID        = 6
 GRID_PX     = CELL * GRID
 PAD         = 50
-SIDE_W      = 260
+SIDE_W      = 280
 WIN_W       = PAD + GRID_PX + PAD + SIDE_W + PAD
 WIN_H       = PAD + GRID_PX + PAD
 FPS         = 60
@@ -25,6 +27,7 @@ ACCENT      = (220,  60,  50)
 ACCENT2     = (255, 200,  60)
 GREEN       = ( 46, 204, 113)
 BLUE        = ( 52, 152, 219)
+PURPLE      = (155,  89, 182)
 PANEL_BG    = (18,  18,  25)
 PANEL_BORDER= (40,  40,  55)
 
@@ -44,25 +47,8 @@ CAR_COLORS = {
 }
 
 # ── random puzzle generator ───────────────────────────────────────────────────
-import random
-CAR_IDS = ['A','B','C','D','E','F','G','H','I','J','K']
-
-def cells_of(row, col, length, horiz):
-    if horiz:
-        return [(row, col + i) for i in range(length)]
-    else:
-        return [(row + i, col) for i in range(length)]
-
-def place_vehicle(grid, row, col, length, horiz, vid):
-    cells = cells_of(row, col, length, horiz)
-    for r, c in cells:
-        if not (0 <= r < 6 and 0 <= c < 6): return False
-        if grid[r][c] is not None: return False
-    for r, c in cells:
-        grid[r][c] = vid
-    return True
-
 def generate_puzzle(num_vehicles=9, puzzle_num=1):
+    ids = ['A','B','C','D','E','F','G','H','I','J','K']
     MAX_TRIES = 300
     for _ in range(MAX_TRIES):
         grid = [[None]*6 for _ in range(6)]
@@ -77,7 +63,6 @@ def generate_puzzle(num_vehicles=9, puzzle_num=1):
         random.shuffle(blocker_cols)
         blocker_count = random.randint(2, min(3, len(blocker_cols)))
         used_ids = 0
-        ids = ['A','B','C','D','E','F','G','H','I','J','K']
 
         for bc in blocker_cols[:blocker_count]:
             length = random.choice([2, 3])
@@ -115,7 +100,6 @@ def generate_puzzle(num_vehicles=9, puzzle_num=1):
 
         blockers = sum(1 for c in range(red_col+2, 6) if grid[2][c] is not None)
         if blockers < 2 or len(cars) < 7: continue
-
         return {"name": f"Puzzle #{puzzle_num}", "cars": cars}
 
     return {
@@ -131,7 +115,7 @@ def generate_puzzle(num_vehicles=9, puzzle_num=1):
         ]
     }
 
-# ── BFS SOLVER ────────────────────────────────────────────────────────────────
+# ── SOLVER HELPERS ────────────────────────────────────────────────────────────
 def state_from_cars(cars):
     return tuple(sorted((c["id"], c["row"], c["col"]) for c in cars))
 
@@ -142,7 +126,6 @@ def get_all_moves(cars):
             r = car["row"] + (0 if car["horiz"] else i)
             c = car["col"] + (i if car["horiz"] else 0)
             grid[r][c] = car["id"]
-
     moves = []
     for car in cars:
         cid, row, col, length, horiz = car["id"], car["row"], car["col"], car["length"], car["horiz"]
@@ -172,6 +155,7 @@ def is_solved(cars):
             return car["col"] + car["length"] == 6
     return False
 
+# ── BFS SOLVER ────────────────────────────────────────────────────────────────
 def bfs_solve(initial_cars):
     initial_state = state_from_cars(initial_cars)
     queue         = deque([(initial_state, initial_cars)])
@@ -182,6 +166,67 @@ def bfs_solve(initial_cars):
     while queue:
         state, cars = queue.popleft()
         states_explored += 1
+        if is_solved(cars):
+            path = []
+            cur = state
+            while parent_move[cur] is not None:
+                path.append(parent_move[cur])
+                cur = visited[cur]
+            path.reverse()
+            return path, states_explored
+        for cid, direction, new_cars in get_all_moves(cars):
+            new_state = state_from_cars(new_cars)
+            if new_state not in visited:
+                visited[new_state]     = state
+                parent_move[new_state] = (cid, direction)
+                queue.append((new_state, new_cars))
+    return None, states_explored
+
+# ── A* SOLVER ────────────────────────────────────────────────────────────────
+def heuristic(cars):
+    """
+    Admissible heuristic for Rush Hour:
+    Count how many vehicles are blocking the red car's path to exit.
+    Each blocker requires at least 1 move, so this never overestimates.
+    """
+    red = next((c for c in cars if c["id"] == "R"), None)
+    if red is None:
+        return 0
+    red_row = red["row"]
+    red_right = red["col"] + red["length"]
+
+    # build grid
+    grid = [[None]*6 for _ in range(6)]
+    for car in cars:
+        for i in range(car["length"]):
+            r = car["row"] + (0 if car["horiz"] else i)
+            c = car["col"] + (i if car["horiz"] else 0)
+            grid[r][c] = car["id"]
+
+    # count blockers between red car's front and exit
+    blockers = set()
+    for col in range(red_right, 6):
+        if grid[red_row][col] is not None:
+            blockers.add(grid[red_row][col])
+
+    return 1 + len(blockers) if blockers else (0 if red_right == 6 else 1)
+
+def astar_solve(initial_cars):
+    initial_state = state_from_cars(initial_cars)
+    h0 = heuristic(initial_cars)
+    # heap: (f, g, state, cars)
+    heap = [(h0, 0, initial_state, initial_cars)]
+    g_score = {initial_state: 0}
+    visited = {initial_state: None}
+    parent_move = {initial_state: None}
+    states_explored = 0
+
+    while heap:
+        f, g, state, cars = heapq.heappop(heap)
+        states_explored += 1
+
+        if g > g_score.get(state, float('inf')):
+            continue  # stale entry
 
         if is_solved(cars):
             path = []
@@ -194,10 +239,13 @@ def bfs_solve(initial_cars):
 
         for cid, direction, new_cars in get_all_moves(cars):
             new_state = state_from_cars(new_cars)
-            if new_state not in visited:
-                visited[new_state]     = state
+            new_g = g + 1
+            if new_g < g_score.get(new_state, float('inf')):
+                g_score[new_state] = new_g
+                visited[new_state] = state
                 parent_move[new_state] = (cid, direction)
-                queue.append((new_state, new_cars))
+                f_new = new_g + heuristic(new_cars)
+                heapq.heappush(heap, (f_new, new_g, new_state, new_cars))
 
     return None, states_explored
 
@@ -254,40 +302,71 @@ class Car:
 # ── Game ──────────────────────────────────────────────────────────────────────
 class Game:
     def __init__(self):
-        self.puzzle_idx     = 1
-        self.cars           = []
-        self.selected       = None
-        self.moves          = 0
-        self.won            = False
-        self.win_alpha      = 0
-        self.current_puzzle = None
-        self.ai_mode        = False
-        self.ai_steps       = []
-        self.ai_step_idx    = 0
-        self.ai_timer       = 0
-        self.ai_delay       = 38
-        self.ai_states      = 0
-        self.ai_no_solution = False
+        self.puzzle_idx      = 1
+        self.cars            = []
+        self.selected        = None
+        self.player_moves    = 0   # moves by human
+        self.moves           = 0   # current move counter (player or AI)
+        self.won             = False
+        self.win_alpha       = 0
+        self.current_puzzle  = None
+
+        # AI state
+        self.ai_mode         = False
+        self.ai_steps        = []
+        self.ai_step_idx     = 0
+        self.ai_timer        = 0
+        self.ai_delay        = 38
+        self.ai_states       = 0
+        self.ai_no_solution  = False
+        self.ai_algo         = "BFS"   # "BFS" or "A*"
+
+        # Comparison tracking
+        self.human_done_moves = None   # set when AI starts (saves human moves)
+        self.ai_optimal_moves = 0      # optimal from solver
+        self.watch_mode       = False  # True = Watch AI Solve flow
+
+        # For A* comparison display
+        self.bfs_result       = None   # (steps, states) from BFS
+        self.astar_result     = None   # (steps, states) from A*
+
         self.new_puzzle()
 
     def new_puzzle(self):
-        data = generate_puzzle(num_vehicles=random.randint(7,10),
+        data = generate_puzzle(num_vehicles=random.randint(7, 10),
                                puzzle_num=self.puzzle_idx)
         self.current_puzzle = data
         self._load_cars(data["cars"])
-        self.ai_mode = False; self.ai_steps = []; self.ai_step_idx = 0
-        self.ai_timer = 0;    self.ai_states = 0;  self.ai_no_solution = False
+        self._reset_ai()
+
+    def _reset_ai(self):
+        self.ai_mode         = False
+        self.ai_steps        = []
+        self.ai_step_idx     = 0
+        self.ai_timer        = 0
+        self.ai_states       = 0
+        self.ai_no_solution  = False
+        self.human_done_moves = None
+        self.ai_optimal_moves = 0
+        self.watch_mode       = False
+        self.bfs_result       = None
+        self.astar_result     = None
 
     def _load_cars(self, car_data):
         self.cars = [Car(dict(c)) for c in car_data]
-        self.selected = None; self.moves = 0; self.won = False; self.win_alpha = 0
+        self.selected = None
+        self.player_moves = 0
+        self.moves = 0
+        self.won   = False
+        self.win_alpha = 0
 
-    def next_puzzle(self): self.puzzle_idx += 1; self.new_puzzle()
+    def next_puzzle(self):
+        self.puzzle_idx += 1
+        self.new_puzzle()
 
     def reset(self):
         self._load_cars(self.current_puzzle["cars"])
-        self.ai_mode = False; self.ai_steps = []; self.ai_step_idx = 0
-        self.ai_timer = 0;    self.ai_states = 0;  self.ai_no_solution = False
+        self._reset_ai()
 
     def grid_map(self):
         g = [[None]*6 for _ in range(6)]
@@ -314,27 +393,69 @@ class Game:
         if direction == "right": car.col += 1
         if direction == "up":    car.row -= 1
         if direction == "down":  car.row += 1
-        car.sync_target(); self.moves += 1; self.check_win(); return True
+        car.sync_target()
+        self.moves += 1
+        if not self.ai_mode:
+            self.player_moves += 1
+        self.check_win()
+        return True
 
     def check_win(self):
         red = next((c for c in self.cars if c.id == "R"), None)
-        if red and red.col + red.length == 6: self.won = True
+        if red and red.col + red.length == 6:
+            self.won = True
 
     def car_from_pixel(self, mx, my):
         for car in self.cars:
             if car.rect_px.collidepoint(mx, my): return car
         return None
 
-    def start_ai(self):
+    # ── Watch AI Solve: reset + solve ─────────────────────────────────────────
+    def watch_ai_solve(self, algo="BFS"):
+        """Save human score, reset board, then run AI."""
+        self.human_done_moves = self.player_moves  # save human's moves
+        self.watch_mode       = True
+        self.ai_algo          = algo
+        # Reset board to initial state
+        self._load_cars(self.current_puzzle["cars"])
+        self._start_ai_internal(algo)
+
+    def _start_ai_internal(self, algo):
         self.ai_no_solution = False
         car_dicts = [{"id":c.id,"row":c.row,"col":c.col,"length":c.length,"horiz":c.horiz}
                      for c in self.cars]
-        steps, states = bfs_solve(car_dicts)
+        if algo == "BFS":
+            steps, states = bfs_solve(car_dicts)
+        else:
+            steps, states = astar_solve(car_dicts)
+
         self.ai_states = states
         if steps is None:
             self.ai_no_solution = True; return
-        self.ai_steps = steps; self.ai_step_idx = 0
-        self.ai_timer = 0;     self.ai_mode = True; self.selected = None
+
+        self.ai_steps         = steps
+        self.ai_optimal_moves = len(steps)
+        self.ai_step_idx      = 0
+        self.ai_timer         = 0
+        self.ai_mode          = True
+        self.selected         = None
+
+        # Also compute the other algo for comparison
+        if algo == "BFS":
+            self.bfs_result   = (steps, states)
+            astar_steps, astar_states = astar_solve(car_dicts)
+            self.astar_result = (astar_steps, astar_states)
+        else:
+            self.astar_result = (steps, states)
+            bfs_steps, bfs_states = bfs_solve(car_dicts)
+            self.bfs_result   = (bfs_steps, bfs_states)
+
+    # Legacy AI start (space bar) — uses selected algo, no reset
+    def start_ai(self, algo="BFS"):
+        self.ai_algo = algo
+        self.human_done_moves = None
+        self.watch_mode = False
+        self._start_ai_internal(algo)
 
     def update_ai(self):
         if not self.ai_mode or self.won: return
@@ -364,15 +485,15 @@ def draw_arrow(surf, x, y, direction, color, size=18, hover=False):
 def draw_car(surf, car, selected, hover, tick, ai_highlight=False):
     r = car.rect_px; base = car.color; is_target = car.id == "R"
     if selected or is_target:
-        g = pygame.Surface((r.width+20,r.height+20), pygame.SRCALPHA)
+        g = pygame.Surface((r.width+20, r.height+20), pygame.SRCALPHA)
         pygame.draw.rect(g, (*base,60), (0,0,r.width+20,r.height+20), border_radius=14)
         surf.blit(g, (r.x-10, r.y-10))
     if is_target:
         pulse = abs(math.sin(tick*0.04))*15
-        g2 = pygame.Surface((r.width+int(pulse)*2,r.height+int(pulse)*2), pygame.SRCALPHA)
+        g2 = pygame.Surface((r.width+int(pulse)*2, r.height+int(pulse)*2), pygame.SRCALPHA)
         pygame.draw.rect(g2, (*base,25), (0,0,r.width+int(pulse)*2,r.height+int(pulse)*2), border_radius=14)
         surf.blit(g2, (r.x-int(pulse), r.y-int(pulse)))
-    sh = pygame.Surface((r.width,r.height), pygame.SRCALPHA)
+    sh = pygame.Surface((r.width, r.height), pygame.SRCALPHA)
     pygame.draw.rect(sh, (0,0,0,60), (3,4,r.width,r.height), border_radius=12)
     surf.blit(sh, (r.x+2, r.y+4))
     bc = lighten(base, 50 if selected else (30 if ai_highlight else (10 if hover else 0)))
@@ -409,73 +530,130 @@ def draw_panel(surf, game, tick):
     px = PAD + GRID_PX + PAD; pw = SIDE_W; ph = GRID_PX
     draw_rounded_rect(surf, PANEL_BG, pygame.Rect(px,PAD,pw,ph),
                       radius=14, border=1, border_color=PANEL_BORDER)
-    y = PAD + 20
+    y = PAD + 16
     t = FONT_BIG.render("RUSH HOUR", True, ACCENT)
     surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 44
-    pygame.draw.line(surf,(50,50,65),(px+16,y),(px+pw-16,y),1); y += 14
+    pygame.draw.line(surf,(50,50,65),(px+16,y),(px+pw-16,y),1); y += 10
 
     pname = game.current_puzzle["name"] if game.current_puzzle else ""
     t = FONT_TINY.render(pname.upper(), True, MUTED)
-    surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 22
-
-    t = FONT_TINY.render("MOVES", True, MUTED)
     surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 18
-    t = FONT_BIG.render(str(game.moves), True, ACCENT2)
-    surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 42
 
-    # BFS stats
-    if game.ai_states > 0:
-        pygame.draw.line(surf,(50,50,65),(px+16,y),(px+pw-16,y),1); y += 10
-        t = FONT_TINY.render("─── BFS RESULTS ───", True, BLUE)
+    # ── Moves display ─────────────────────────────────────────────────────────
+    t = FONT_TINY.render("YOUR MOVES", True, MUTED)
+    surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 16
+    player_display = str(game.player_moves)
+    t = FONT_BIG.render(player_display, True, ACCENT2)
+    surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 38
+
+    # ── Comparison section ────────────────────────────────────────────────────
+    if game.watch_mode and game.human_done_moves is not None:
+        pygame.draw.line(surf,(50,50,65),(px+16,y),(px+pw-16,y),1); y += 8
+        t = FONT_TINY.render("── COMPARISON ──", True, ACCENT2)
         surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 18
-        t = FONT_TINY.render(f"States explored: {game.ai_states}", True, MUTED)
+
+        # Human
+        t_lbl = FONT_TINY.render("You:", True, MUTED)
+        surf.blit(t_lbl, (px+16, y))
+        human_col = GREEN if game.human_done_moves <= game.ai_optimal_moves else ACCENT
+        t_val = FONT_SM.render(f"{game.human_done_moves} moves", True, human_col)
+        surf.blit(t_val, (px+pw-t_val.get_width()-16, y)); y += 20
+
+        # AI (current algo)
+        ai_label = f"AI ({game.ai_algo}):"
+        t_lbl = FONT_TINY.render(ai_label, True, MUTED)
+        surf.blit(t_lbl, (px+16, y))
+        ai_moves = game.ai_step_idx if game.ai_mode else game.ai_optimal_moves
+        ai_col = GREEN if game.ai_optimal_moves <= game.human_done_moves else BLUE
+        t_val = FONT_SM.render(f"{ai_moves} moves", True, ai_col)
+        surf.blit(t_val, (px+pw-t_val.get_width()-16, y)); y += 20
+
+        # Winner badge
+        if not game.ai_mode and game.won:
+            if game.human_done_moves == game.ai_optimal_moves:
+                badge_txt = "🏆 TIED — Optimal!"
+                badge_col = ACCENT2
+            elif game.human_done_moves < game.ai_optimal_moves:
+                badge_txt = "🏆 YOU WIN!"
+                badge_col = GREEN
+            else:
+                diff = game.human_done_moves - game.ai_optimal_moves
+                badge_txt = f"AI wins by {diff}"
+                badge_col = BLUE
+            t = FONT_SM.render(badge_txt, True, badge_col)
+            surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 20
+        y += 4
+
+    # ── BFS / A* stats ────────────────────────────────────────────────────────
+    if game.ai_states > 0 or game.bfs_result:
+        pygame.draw.line(surf,(50,50,65),(px+16,y),(px+pw-16,y),1); y += 8
+        t = FONT_TINY.render("── SOLVER STATS ──", True, BLUE)
         surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 16
-        t = FONT_TINY.render(f"Optimal moves: {len(game.ai_steps)}", True, MUTED)
-        surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 16
+
+        if game.bfs_result:
+            bfs_steps, bfs_states = game.bfs_result
+            t = FONT_TINY.render(f"BFS  │ states: {bfs_states}", True, BLUE)
+            surf.blit(t, (px+16, y)); y += 14
+            t = FONT_TINY.render(f"     │ optimal: {len(bfs_steps) if bfs_steps else '—'} moves", True, MUTED)
+            surf.blit(t, (px+16, y)); y += 16
+
+        if game.astar_result:
+            astar_steps, astar_states = game.astar_result
+            t = FONT_TINY.render(f"A*   │ states: {astar_states}", True, PURPLE)
+            surf.blit(t, (px+16, y)); y += 14
+            t = FONT_TINY.render(f"     │ optimal: {len(astar_steps) if astar_steps else '—'} moves", True, MUTED)
+            surf.blit(t, (px+16, y)); y += 16
+
         if game.ai_mode:
             prog = f"Playing: {game.ai_step_idx} / {len(game.ai_steps)}"
             t = FONT_TINY.render(prog, True, GREEN)
-            surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 16
+            surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 14
         y += 4
     else:
-        y += 10
+        y += 8
+
+    pygame.draw.line(surf,(50,50,65),(px+16,y),(px+pw-16,y),1); y += 8
+
+    # ── Instructions ──────────────────────────────────────────────────────────
+    lines = [("HOW TO PLAY", MUTED),("Click car + Arrow keys",WHITE),
+             ("R = Reset  |  N = Next",MUTED),("",""),("GOAL",MUTED),("Red car → exit!",ACCENT)]
+    for text, color in lines:
+        if not text: y += 3; continue
+        f = FONT_TINY if color == MUTED else FONT_SM
+        t = f.render(text, True, color)
+        surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 18
 
     pygame.draw.line(surf,(50,50,65),(px+16,y),(px+pw-16,y),1); y += 10
 
-    lines = [("HOW TO PLAY", MUTED),("Click car + Arrow keys",WHITE),
-             ("SPACE = AI Solve",ACCENT2),("",""),("GOAL",MUTED),("Red car → exit!",ACCENT)]
-    for text, color in lines:
-        if not text: y += 4; continue
-        f = FONT_TINY if color == MUTED else FONT_SM
-        t = f.render(text, True, color)
-        surf.blit(t, (px+(pw-t.get_width())//2, y)); y += 20
-
-    pygame.draw.line(surf,(50,50,65),(px+16,y),(px+pw-16,y),1); y += 12
-
+    # ── Buttons ───────────────────────────────────────────────────────────────
     mx, my = pygame.mouse.get_pos()
-    bw, bh = pw-32, 38; bx = px+16
+    bw, bh = pw-32, 36; bx = px+16
     buttons = {}
 
-    def btn(label, idle, active):
+    def btn(label, idle, active, key=None):
         nonlocal y
         rect = pygame.Rect(bx, y, bw, bh)
         bg = active if rect.collidepoint(mx,my) else idle
         draw_rounded_rect(surf, bg, rect, radius=8, border=1, border_color=(80,80,100))
         t = FONT_SM.render(label, True, WHITE)
         surf.blit(t, (bx+(bw-t.get_width())//2, y+(bh-t.get_height())//2))
-        y += bh+8
+        y += bh+6
+        if key: buttons[key] = rect
         return rect
 
-    buttons["reset"] = btn("↺  Reset",          (40,40,55), (70,70,95))
-    buttons["next"]  = btn("Next Puzzle →",      (40,40,55), (70,70,95))
+    btn("↺  Reset", (40,40,55), (70,70,95), "reset")
+    btn("Next Puzzle →", (40,40,55), (70,70,95), "next")
 
+    y += 4
+    # Watch AI buttons (BFS and A*)
     if game.ai_mode:
-        ai_lbl = f"⏸ AI Playing... {game.ai_step_idx}/{len(game.ai_steps)}"
-        buttons["ai"] = btn(ai_lbl, (20,100,60), (30,140,80))
+        ai_lbl = f"⏸ {game.ai_algo} Playing... {game.ai_step_idx}/{len(game.ai_steps)}"
+        btn(ai_lbl, (20,100,60), (30,140,80), "watch_bfs")
     elif game.ai_no_solution:
-        buttons["ai"] = btn("✗ No Solution", (100,30,30), (130,40,40))
+        btn("✗ No Solution", (100,30,30), (130,40,40), "watch_bfs")
     else:
-        buttons["ai"] = btn("🤖 AI Solve (BFS)", (30,80,150), (50,110,190))
+        btn("👁 Watch BFS Solve", (30,80,150), (50,110,190), "watch_bfs")
+        btn("👁 Watch A* Solve",  (80,30,130), (110,50,170), "watch_astar")
 
     return buttons
 
@@ -487,7 +665,7 @@ def draw_move_arrows(surf, game, tick):
     arrow_rects = {}
     for d in dirs:
         if not game.can_move(car, d): continue
-        if d=="left":   ax,ay = r.left-28, r.centery
+        if d=="left":    ax,ay = r.left-28, r.centery
         elif d=="right": ax,ay = r.right+10, r.centery
         elif d=="up":    ax,ay = r.centerx, r.top-28
         else:            ax,ay = r.centerx, r.bottom+10
@@ -498,89 +676,171 @@ def draw_move_arrows(surf, game, tick):
 def draw_win_overlay(surf, game):
     if not game.won: return
     game.win_alpha = min(game.win_alpha+6, 220)
-    ov = pygame.Surface((WIN_W,WIN_H), pygame.SRCALPHA)
+    ov = pygame.Surface((WIN_W, WIN_H), pygame.SRCALPHA)
     ov.fill((0,0,0,game.win_alpha)); surf.blit(ov,(0,0))
-    cx,cy = WIN_W//2, WIN_H//2
-    box = pygame.Rect(cx-190,cy-130,380,270)
-    draw_rounded_rect(surf,(20,20,28),box,radius=18,border=2,border_color=GREEN)
-    t = FONT_BIG.render("SOLVED!", True, GREEN)
-    surf.blit(t,(cx-t.get_width()//2, cy-100))
-    t2 = FONT_SM.render(f"Completed in {game.moves} moves", True, MUTED)
-    surf.blit(t2,(cx-t2.get_width()//2, cy-54))
-    if game.ai_states > 0:
-        t3 = FONT_TINY.render(f"BFS: {game.ai_states} states explored  |  optimal: {len(game.ai_steps)} moves", True, BLUE)
-        surf.blit(t3,(cx-t3.get_width()//2, cy-26))
-    btn = pygame.Rect(cx-100,cy+30,200,44)
-    mx,my = pygame.mouse.get_pos(); hover = btn.collidepoint(mx,my)
+    cx, cy = WIN_W//2, WIN_H//2
+    box_h = 310 if game.watch_mode else 260
+    box = pygame.Rect(cx-200, cy-box_h//2, 400, box_h)
+    draw_rounded_rect(surf, (20,20,28), box, radius=18, border=2, border_color=GREEN)
+    y = box.y + 20
+
+    t = FONT_BIG.render("SOLVED! 🎉", True, GREEN)
+    surf.blit(t, (cx-t.get_width()//2, y)); y += 44
+
+    if game.watch_mode and game.human_done_moves is not None:
+        # comparison
+        t = FONT_SM.render("Your moves vs AI:", True, MUTED)
+        surf.blit(t, (cx-t.get_width()//2, y)); y += 24
+
+        human_col = GREEN if game.human_done_moves <= game.ai_optimal_moves else ACCENT
+        ai_col    = GREEN if game.ai_optimal_moves <= game.human_done_moves else BLUE
+
+        t = FONT_MED.render(f"You:  {game.human_done_moves} moves", True, human_col)
+        surf.blit(t, (cx-t.get_width()//2, y)); y += 28
+        t = FONT_MED.render(f"AI ({game.ai_algo}): {game.ai_optimal_moves} moves", True, ai_col)
+        surf.blit(t, (cx-t.get_width()//2, y)); y += 36
+
+        if game.human_done_moves == game.ai_optimal_moves:
+            verdict = "🏆 Optimal — you matched the AI!"
+            vc = ACCENT2
+        elif game.human_done_moves < game.ai_optimal_moves:
+            verdict = f"🏆 You beat the AI by {game.human_done_moves - game.ai_optimal_moves}... wait, AI is optimal 😅"
+            vc = ACCENT2
+        else:
+            diff = game.human_done_moves - game.ai_optimal_moves
+            verdict = f"AI was faster by {diff} move{'s' if diff>1 else ''}"
+            vc = BLUE
+        t = FONT_SM.render(verdict, True, vc)
+        surf.blit(t, (cx-t.get_width()//2, y)); y += 30
+
+        # algo comparison
+        if game.bfs_result and game.astar_result:
+            bfs_s, bfs_st = game.bfs_result
+            ast_s, ast_st = game.astar_result
+            t2 = FONT_TINY.render(
+                f"BFS: {bfs_st} states  |  A*: {ast_st} states", True, MUTED)
+            surf.blit(t2, (cx-t2.get_width()//2, y)); y += 20
+    else:
+        t2 = FONT_SM.render(f"Completed in {game.player_moves} moves", True, MUTED)
+        surf.blit(t2, (cx-t2.get_width()//2, y)); y += 30
+        if game.ai_states > 0 and game.ai_steps:
+            t3 = FONT_TINY.render(
+                f"BFS: {game.ai_states} states  |  optimal: {len(game.ai_steps)} moves", True, BLUE)
+            surf.blit(t3, (cx-t3.get_width()//2, y)); y += 20
+
+    # Next button
+    btn_y = box.bottom - 52
+    btn = pygame.Rect(cx-100, btn_y, 200, 44)
+    mx, my = pygame.mouse.get_pos()
+    hover = btn.collidepoint(mx, my)
     draw_rounded_rect(surf, GREEN if hover else (40,140,80), btn, radius=10)
     t4 = FONT_SM.render("Next Puzzle →", True, (0,0,0) if hover else WHITE)
-    surf.blit(t4,(cx-t4.get_width()//2, cy+30+(44-t4.get_height())//2))
+    surf.blit(t4, (cx-t4.get_width()//2, btn_y+(44-t4.get_height())//2))
     return btn
 
 # ── main ──────────────────────────────────────────────────────────────────────
 def main():
     screen = pygame.display.set_mode((WIN_W, WIN_H))
-    pygame.display.set_caption("Rush Hour — BFS AI Solver")
-    clock = pygame.time.Clock()
-    game  = Game(); tick = 0; arrow_rects = {}; buttons = {}
+    pygame.display.set_caption("Rush Hour — BFS & A* AI Solver")
+    clock  = pygame.time.Clock()
+    game   = Game()
+    tick   = 0
+    arrow_rects = {}
+    buttons     = {}
 
     while True:
-        tick += 1; mx,my = pygame.mouse.get_pos()
+        tick += 1
+        mx, my = pygame.mouse.get_pos()
 
         for event in pygame.event.get():
-            if event.type == pygame.QUIT: pygame.quit(); sys.exit()
+            if event.type == pygame.QUIT:
+                pygame.quit(); sys.exit()
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                # Win overlay
                 if game.won:
-                    if pygame.Rect(WIN_W//2-100,WIN_H//2+30,200,44).collidepoint(mx,my):
+                    win_btn = pygame.Rect(WIN_W//2-100, WIN_H//2 + (310 if game.watch_mode else 260)//2 - 52, 200, 44)
+                    if win_btn.collidepoint(mx, my):
                         game.next_puzzle()
                     continue
-                if buttons.get("reset") and buttons["reset"].collidepoint(mx,my): game.reset(); continue
-                if buttons.get("next")  and buttons["next"].collidepoint(mx,my):  game.next_puzzle(); continue
-                if buttons.get("ai")    and buttons["ai"].collidepoint(mx,my):
-                    if not game.ai_mode and not game.won: game.start_ai()
-                    continue
+
+                # Panel buttons
+                if buttons.get("reset"):
+                    if buttons["reset"].collidepoint(mx, my):
+                        game.reset(); continue
+                if buttons.get("next"):
+                    if buttons["next"].collidepoint(mx, my):
+                        game.next_puzzle(); continue
+                if buttons.get("watch_bfs"):
+                    if buttons["watch_bfs"].collidepoint(mx, my):
+                        if not game.ai_mode and not game.won:
+                            game.watch_ai_solve("BFS")
+                        continue
+                if buttons.get("watch_astar"):
+                    if buttons["watch_astar"].collidepoint(mx, my):
+                        if not game.ai_mode and not game.won:
+                            game.watch_ai_solve("A*")
+                        continue
+
+                # Grid interaction
                 if not game.ai_mode:
                     clicked_arrow = False
-                    for d,(ax,ay) in arrow_rects.items():
-                        if math.hypot(mx-ax,my-ay)<22 and game.selected:
-                            game.move(game.selected,d); clicked_arrow=True; break
+                    for d, (ax, ay) in arrow_rects.items():
+                        if math.hypot(mx-ax, my-ay) < 22 and game.selected:
+                            game.move(game.selected, d)
+                            clicked_arrow = True; break
                     if clicked_arrow: continue
-                    clicked = game.car_from_pixel(mx,my)
-                    if clicked: game.selected = clicked if game.selected!=clicked else None
-                    elif PAD<=mx<=PAD+GRID_PX and PAD<=my<=PAD+GRID_PX: game.selected=None
+                    clicked = game.car_from_pixel(mx, my)
+                    if clicked:
+                        game.selected = clicked if game.selected != clicked else None
+                    elif PAD <= mx <= PAD+GRID_PX and PAD <= my <= PAD+GRID_PX:
+                        game.selected = None
 
             if event.type == pygame.KEYDOWN and not game.ai_mode and not game.won:
-                km = {pygame.K_LEFT:"left",pygame.K_RIGHT:"right",
-                      pygame.K_UP:"up",pygame.K_DOWN:"down",
-                      pygame.K_a:"left",pygame.K_d:"right",pygame.K_w:"up",pygame.K_s:"down"}
-                if event.key in km and game.selected: game.move(game.selected,km[event.key])
-                if event.key==pygame.K_ESCAPE: game.selected=None
-                if event.key==pygame.K_r: game.reset()
-                if event.key==pygame.K_n: game.next_puzzle()
-                if event.key==pygame.K_SPACE: game.start_ai()
+                km = {pygame.K_LEFT:"left", pygame.K_RIGHT:"right",
+                      pygame.K_UP:"up",    pygame.K_DOWN:"down",
+                      pygame.K_a:"left",   pygame.K_d:"right",
+                      pygame.K_w:"up",     pygame.K_s:"down"}
+                if event.key in km and game.selected:
+                    game.move(game.selected, km[event.key])
+                if event.key == pygame.K_ESCAPE: game.selected = None
+                if event.key == pygame.K_r:     game.reset()
+                if event.key == pygame.K_n:     game.next_puzzle()
+                # SPACE = Watch BFS solve (with reset + compare)
+                if event.key == pygame.K_SPACE:
+                    game.watch_ai_solve("BFS")
+                # SHIFT+SPACE or 'a' key = Watch A* solve
+                if event.key == pygame.K_1:
+                    game.watch_ai_solve("BFS")
+                if event.key == pygame.K_2:
+                    game.watch_ai_solve("A*")
 
         game.update_ai()
-        for car in game.cars: car.update()
+        for car in game.cars:
+            car.update()
 
+        # Draw background
         screen.fill(BG)
-        for i in range(0,WIN_W,40): pygame.draw.line(screen,(20,20,28),(i,0),(i,WIN_H))
-        for j in range(0,WIN_H,40): pygame.draw.line(screen,(20,20,28),(0,j),(WIN_W,j))
+        for i in range(0, WIN_W, 40):
+            pygame.draw.line(screen, (20,20,28), (i,0), (i,WIN_H))
+        for j in range(0, WIN_H, 40):
+            pygame.draw.line(screen, (20,20,28), (0,j), (WIN_W,j))
 
         draw_grid(screen, game)
 
-        ai_next = game.ai_steps[game.ai_step_idx][0] if (game.ai_mode and game.ai_step_idx<len(game.ai_steps)) else None
-        hover_car = game.car_from_pixel(mx,my)
+        ai_next   = game.ai_steps[game.ai_step_idx][0] if (game.ai_mode and game.ai_step_idx < len(game.ai_steps)) else None
+        hover_car = game.car_from_pixel(mx, my)
         for car in game.cars:
             draw_car(screen, car,
-                     selected=(game.selected==car) or (game.ai_mode and car.id==ai_next),
-                     hover=hover_car==car and not game.ai_mode,
+                     selected=(game.selected == car) or (game.ai_mode and car.id == ai_next),
+                     hover=hover_car == car and not game.ai_mode,
                      tick=tick,
-                     ai_highlight=game.ai_mode and car.id==ai_next)
+                     ai_highlight=game.ai_mode and car.id == ai_next)
 
         arrow_rects = draw_move_arrows(screen, game, tick)
         buttons     = draw_panel(screen, game, tick)
-        if game.won: draw_win_overlay(screen, game)
+        if game.won:
+            draw_win_overlay(screen, game)
 
         pygame.display.flip()
         clock.tick(FPS)
